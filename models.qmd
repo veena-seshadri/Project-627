@@ -1,0 +1,172 @@
+---
+title: "Data work"
+format: pdf
+editor: visual
+---
+
+# Loading Packages & Cleaning Data
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(rpart)
+library(rpart.plot)
+library(boot)
+
+nutrition_raw <- read.csv("Nutrition.csv")
+
+
+nutrition <- nutrition_raw |>
+  rename(
+    data_value = Data_Value,
+    question = Question,
+    strat_category = StratificationCategory1,
+    strat_value = Stratification1,
+    location_desc = LocationDesc
+  ) |>
+  filter(strat_category == "Income")|>
+  select(YearStart, location_desc, strat_value, question, data_value, Class)
+
+nutrition <- nutrition |>
+  mutate(
+    obs_id = paste(YearStart, location_desc, strat_value, sep = "_")
+  )
+
+inactivity <- nutrition |>
+  filter(str_detect(question, "no leisure-time physical activity")) |>
+  select(obs_id, inactivity_perc = data_value) |>
+  mutate(inactivity_perc = as.numeric(inactivity_perc)) 
+
+bmi <- nutrition |>
+  filter(str_detect(question, "obesity") & str_detect(question, "18 years and older")) |>
+  select(obs_id, obesity_perc = data_value) |>
+  mutate(obesity_perc = as.numeric(obesity_perc)) 
+
+classification.data <- full_join(inactivity, bmi, by = "obs_id") |>
+  separate(obs_id, into = c("year", "location", "income_group"), sep = "_") |>
+  drop_na()
+
+classification <- classification.data |>
+  mutate(
+    bmi_category = case_when(
+      obesity_perc <= quantile(obesity_perc, 0.33) ~ "Low_Obesity_Risk",
+      obesity_perc > quantile(obesity_perc, 0.33) & obesity_perc <= quantile(obesity_perc, 0.66) ~ "Medium_Obesity_Risk",
+      TRUE ~ "High_Obesity_Risk"
+    ),
+    bmi_category = as.factor(bmi_category),
+    income_group = as.factor(income_group)
+  )
+
+fruit_veg <- nutrition |>
+  filter(grepl("Fruit", Class, ignore.case = TRUE)) |>
+  filter(!is.na(data_value))
+
+age_data <- fruit_veg |>
+  filter(strat_value == "Age(years)") 
+```
+
+
+# Model 3 - Polynomial Regression + Bootstrap
+
+```{r}
+# 3 Polynomial Regression
+
+extract_midpoint <- function(s) {
+  nums <- as.numeric(unlist(str_extract_all(s, "\\d+")))
+  
+  if(length(nums) == 2) {
+    return(mean(nums)) 
+  } else if (length(nums) == 1) {
+    if(nums[1] >= 65) return(70)
+    return(nums[1])
+  } else {
+    return(NA)
+  }
+}
+
+age_data <- nutrition_raw|>
+  rename(
+    data_value = Data_Value,
+    strat_category = StratificationCategory1, 
+    strat_value = Stratification1,            
+    class = Class
+  ) |>
+  filter(grepl("Fruit", class, ignore.case = TRUE)) |> 
+  filter(strat_category == "Age (years)") |> 
+  filter(!is.na(data_value))
+
+age_data <- age_data |>
+  rowwise() |>
+  mutate(Age_Midpoint = extract_midpoint(strat_value)) |>
+  ungroup() |>
+  filter(!is.na(Age_Midpoint))
+
+model_age_poly <- lm(data_value ~ poly(Age_Midpoint, 2, raw = TRUE), data = age_data)
+print(summary(model_age_poly))
+
+model_age_linear <- lm(data_value ~ Age_Midpoint, data = age_data)
+```
+
+```{r}
+# 3 Bootstrap
+
+boot_fn <- function(data, index) {
+  d <- data[index, ]
+  tryCatch({
+    fit <- lm(data_value ~ poly(Age_Midpoint, 2, raw = TRUE), data = d)
+    return(coef(fit))
+  }, error = function(e) return(rep(NA, 3)))
+}
+
+set.seed(123)
+boot_results <- boot(data = age_data, statistic = boot_fn, R = 500) 
+
+print(boot_results)
+```
+
+```{r}
+# 3 Visualization
+
+plot_age <- ggplot(age_data, aes(x = Age_Midpoint, y = data_value)) +
+  geom_jitter(alpha = 0.3, width = 1, height = 0) +
+  stat_smooth(method = "lm", formula = y ~ poly(x, 2), color = "blue", fill = "lightblue") +
+  labs(
+    title = "Age vs. Consumption (Polynomial Fit)",
+    subtitle = "Using Robust Age Extraction",
+    x = "Age (Midpoint)",
+    y = "Consumption Metric"
+  ) +
+  theme_minimal()
+
+print(plot_age)
+```
+
+
+# Model 6 - Regression/Classification Tree
+
+```{r}
+# 6
+
+set.seed(1234)
+full_tree <- rpart(
+  bmi_category ~ inactivity_perc + income_group,
+  data = model_data,
+  method = "class"
+)
+
+rpart.plot(full_tree)
+```
+
+```{r}
+# 6 Pruned 
+
+printcp(full_tree)
+
+best_cp <- full_tree$cptable[which.min(full_tree$cptable[,"xerror"]),"CP"]
+
+pruned_tree <- prune(full_tree, cp = best_cp)
+
+rpart.plot(pruned_tree, extra = 104, fallen.leaves = TRUE, type = 4, nn = TRUE)
+```
+
