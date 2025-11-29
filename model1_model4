@@ -1,0 +1,119 @@
+library(dplyr)
+library(stringr)
+library(caret)
+library(randomForest)
+
+library(ggplot2)
+library(scales)
+library(maps)
+library(mapdata)
+library(sf)
+library(cowplot)
+
+
+# LOAD DATA
+path <- "Nutrition__Physical_Activity__and_Obesity_-_Behavioral_Risk_Factor_Surveillance_System(in).csv"
+df <- read.csv(path, stringsAsFactors = FALSE)
+
+
+# QUESTION 1:
+# What is the association between median income and the mean BMI value (Data_Value) across states after controlling for sex and race/ethnicity?
+
+
+# 1A. Compute mean obesity (%) per state
+state_obesity <- df %>%
+  filter(Topic == "Obesity / Weight Status",
+         StratificationCategory1 == "Total") %>%
+  group_by(LocationAbbr) %>%
+  summarize(mean_obesity = mean(Data_Value, na.rm = TRUE))
+
+
+# 1B. Map income categories → numeric midpoints
+income_midpoints <- c(
+  "Less than $15,000" = 12500,
+  "$15,000 - $24,999" = 20000,
+  "$25,000 - $34,999" = 30000,
+  "$35,000 - $49,999" = 42500,
+  "$50,000 - $74,999" = 62500,
+  "$75,000 or greater" = 87500,
+  "Data not reported" = NA
+)
+
+income_df <- df %>%
+  filter(StratificationCategory1 == "Income") %>%
+  mutate(income_num = income_midpoints[Stratification1]) %>%
+  group_by(LocationAbbr) %>%
+  summarize(state_median_income = median(income_num, na.rm = TRUE))
+
+
+# 1C. Physical inactivity: % reporting no leisure-time activity
+state_inactivity <- df %>%
+  filter(Topic == "Physical Activity - Behavior",
+         StratificationCategory1 == "Total",
+         str_detect(Question, regex("no leisure-time", ignore_case = TRUE))) %>%
+  group_by(LocationAbbr) %>%
+  summarize(pct_no_leisure_activity = mean(Data_Value, na.rm = TRUE))
+
+
+# 1D. Merge features into a single state-level dataset
+states <- state_obesity %>%
+  left_join(income_df, by = "LocationAbbr") %>%
+  left_join(state_inactivity, by = "LocationAbbr") %>%
+  drop_na()
+
+
+# 1E. Regression Models
+model1 <- lm(mean_obesity ~ state_median_income, data = states)
+model2 <- lm(mean_obesity ~ state_median_income + pct_no_leisure_activity, data = states)
+
+cat("QUESTION 1: Regression Results\n")
+
+cat("=== MODEL 1: Obesity ~ Median Income ===\n")
+print(summary(model1))
+
+cat("\n=== MODEL 2: Obesity ~ Income + Physical Inactivity ===\n")
+print(summary(model2))
+
+
+
+# QUESTION 4:
+#Can we classify whether a respondent is obese (BMI ≥ 30) or not obese, based on physical activity levels, education, income, and race/ethnicity?
+
+
+# 4A. Create binary high-obesity label for states
+median_obesity <- median(states$mean_obesity)
+states$high_obesity <- ifelse(states$mean_obesity >= median_obesity, 1, 0)
+
+
+# 4B. Prepare predictors and model training
+predictors <- states %>%
+  select(state_median_income, pct_no_leisure_activity)
+
+set.seed(42)
+
+# Logistic Regression (caret)
+logreg_model <- train(
+  x = predictors,
+  y = factor(states$high_obesity),
+  method = "glm",
+  family = "binomial",
+  trControl = trainControl(method = "cv", number = 5)
+)
+
+# Random Forest
+rf_model <- train(
+  x = predictors,
+  y = factor(states$high_obesity),
+  method = "rf",
+  trControl = trainControl(method = "cv", number = 5)
+)
+
+cat("QUESTION 4: Classifier Results\n")
+
+cat("Logistic Regression Accuracy (CV): ",
+    max(logreg_model$results$Accuracy), "\n")
+
+cat("Random Forest Accuracy (CV): ",
+    max(rf_model$results$Accuracy), "\n")
+
+
