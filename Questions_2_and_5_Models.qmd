@@ -1,0 +1,324 @@
+---
+title: "STAT-627 Project"
+author: "Danny Tapp"
+format: pdf
+editor: visual
+---
+
+## Question 2:
+
+### How well do the variables age, sex, race/ethnicity, income, and education level predict the percentage of adults who achieve at least 150 minutes a week of moderate-intensity aerobic physical activity across US states?
+
+```{r,warning=FALSE,message=FALSE}
+library(tidyverse)
+
+### Load in data 
+food <- read_csv("food.csv")
+```
+
+```{r}
+### Get the question about 150+ min of exercise a week and the necessary variables
+df_model <- food |>
+  filter(
+    TopicID == "PA1",  
+    QuestionID == "Q043",
+    !is.na(Data_Value), 
+    StratificationCategory1 %in% c("Age (years)", "Sex", "Race/Ethnicity", "Income", "Education")
+  )
+
+### Pivot wider so each stratum becomes it own column
+df_wide <- df_model |>
+  dplyr::select(LocationAbbr, YearStart,
+         StratificationCategory1, Stratification1, Data_Value) |>
+  unite(var, StratificationCategory1, Stratification1, sep = "_") |>
+  pivot_wider(names_from = var, values_from = Data_Value)
+
+```
+
+```{r}
+### Impute missing values using the median of each column
+df_imp <- df_wide |>
+  mutate(across(where(is.numeric), ~ replace_na(.x, median(.x, na.rm = TRUE))))
+
+### Extract the overall percentage values
+df_overall <- food |>
+  filter(
+    TopicID == "PA1",
+    QuestionID == "Q043",
+    is.na(StratificationCategory1) | 
+      StratificationCategory1 %in% c("Overall", "Total") |
+      Stratification1 %in% c("Overall", "Total", "OVR")
+  ) |>
+  dplyr::select(LocationAbbr, YearStart, PercentOverall = Data_Value)
+
+### Join the two data sets
+df_model2 <- df_imp |>
+  left_join(df_overall, by = c("LocationAbbr", "YearStart"))
+
+```
+
+```{r}
+### Predictor Matrix
+X <- df_model2 |>
+  select(-LocationAbbr, -YearStart, -PercentOverall) |>
+  as.matrix()
+
+### Response
+y <- df_model2$PercentOverall
+```
+
+```{r}
+library(glmnet)
+
+### Standardize predictor matrix for ridge
+X <- scale(X)
+
+set.seed(123)
+
+### 10-fold cross-validation ridge regression
+cv_ridge <- cv.glmnet(
+  X, y,
+  alpha = 0,         
+  nfolds = 10
+)
+
+### Lambda that minimizes cross-validation error
+best_lambda <- cv_ridge$lambda.min
+
+best_lambda
+```
+
+```{r}
+### Fit ridge regression model using best lambda
+ridge_final <- glmnet(
+  X, y,
+  alpha = 0,
+  lambda = best_lambda
+)
+
+coef(ridge_final)
+plot(cv_ridge)
+```
+
+```{r}
+### Mean CV error for each lambda
+cv_ridge$cvm     
+### Lambda with lowest CV error
+cv_ridge$lambda.min
+### Lambda within 1 se of min
+cv_ridge$lambda.1se
+```
+
+```{r}
+### Best lambda's MSE
+best_lambda <- cv_ridge$lambda.min
+best_mse <- cv_ridge$cvm[cv_ridge$lambda == best_lambda]
+```
+
+```{r}
+best_lambda
+best_mse
+```
+
+```{r}
+### Take model coefficients and put them into a vector with their names
+coef_vec <- as.numeric(coef(ridge_final))   
+names_vec <- rownames(coef(ridge_final))    
+
+### DF of coefficients
+coef_df <- data.frame(
+  variable = names_vec,
+  coefficient = coef_vec,
+  row.names = NULL
+)
+
+### Remove intercept
+coef_df <- coef_df |> 
+  dplyr::filter(variable != "(Intercept)")
+
+### Top 10 predictors based on largest aboslute coefficients
+top10 <- coef_df |>
+  dplyr::arrange(desc(abs(coefficient))) |>
+  dplyr::slice(1:10)
+
+top10
+
+```
+
+## Question 5:
+
+### Can the percentage of adults in a state who engage in healthy behaviors (exercising and eating fruits/vegetables) be used to classify whether a state's obesity rate is above or below the national median?
+
+```{r}
+### Get questions for fruit intake, vegetable intake, and obesity
+### Get overall values
+veggie_model <- food |>
+  filter(
+    QuestionID %in% c("Q018", "Q019", "Q036"),
+    StratificationCategoryId1 == "OVR",
+    !is.na(Data_Value)
+  )
+
+```
+
+```{r}
+### Rename to make it easier to distinguish variables
+veggie_clean <- veggie_model |>
+  mutate(
+    Var = case_when(
+      QuestionID == "Q018" ~ "FruitUnhealthy",
+      QuestionID == "Q019" ~ "VegUnhealthy",
+      QuestionID == "Q036" ~ "Obesity"
+    )
+  )
+
+```
+
+```{r}
+### Pivot wider so each row is a state-year with all 3 variables
+veggie_wide <- veggie_clean |>
+  dplyr::select(LocationAbbr, YearStart, Var, Data_Value) |>
+  pivot_wider(
+    names_from = Var,
+    values_from = Data_Value
+  )
+
+```
+
+```{r}
+### Change to percent healthy
+veggie_wide <- veggie_wide |>
+  mutate(
+    FruitHealthy = 100 - FruitUnhealthy,
+    VegHealthy = 100 - VegUnhealthy
+  )
+
+```
+
+```{r}
+### Get national median obesity rate
+national_median <- veggie_wide |>
+  filter(LocationAbbr == "US") |>
+  summarize(med = median(Obesity, na.rm = TRUE)) |>
+  pull(med)
+
+```
+
+```{r}
+### Classify which states are above or below the national median obesity
+veggie_wide <- veggie_wide |>
+  mutate(
+    ObesityClass = ifelse(
+      Obesity > national_median,
+      "High",
+      "Low"
+    )
+  )
+
+```
+
+```{r}
+### Remove US overall
+veggie_model_ready <- veggie_wide |>
+  filter(!LocationAbbr == "US")
+
+veggie_lqda <- veggie_model_ready |>
+  dplyr::select(LocationAbbr:ObesityClass) |>
+  drop_na()
+```
+
+```{r}
+library(MASS)
+
+### Fit LDA model 
+lda_fit <- lda(
+  ObesityClass ~ FruitHealthy + VegHealthy,
+  data = veggie_lqda
+)
+
+lda_fit
+```
+
+```{r}
+### LDA coefficients
+lda_fit$scaling
+```
+
+```{r}
+### Look at averages between classes
+veggie_lqda |> 
+  group_by(ObesityClass) |> 
+  summarise(
+    n = n(),
+    FruitHealthy = mean(FruitHealthy, na.rm = TRUE),
+    VegHealthy   = mean(VegHealthy, na.rm = TRUE),
+    Obesity      = mean(Obesity, na.rm = TRUE)
+  )
+
+```
+
+```{r}
+### Priors
+lda_fit$prior
+### Group means for each predictor by class
+lda_fit$means
+```
+
+```{r}
+### Fit QDA model
+qda_fit <- qda(
+  ObesityClass ~ FruitHealthy + VegHealthy,
+  data = veggie_lqda
+)
+
+qda_fit
+```
+
+```{r}
+### Priors
+qda_fit$prior
+### ### Group means for each predictor by class
+qda_fit$means
+```
+
+```{r}
+### Predict both LDA and QDA
+lda_pred <- predict(lda_fit)
+qda_pred <- predict(qda_fit)
+```
+
+```{r}
+### LDA Confusion matrix 
+table(veggie_lqda$ObesityClass, lda_pred$class)
+### Classification rate
+mean(lda_pred$class == veggie_lqda$ObesityClass)
+```
+
+```{r}
+### QDA Confusion matrix
+table(veggie_lqda$ObesityClass, qda_pred$class)
+### Classification Rate
+mean(qda_pred$class == veggie_lqda$ObesityClass)
+```
+
+```{r}
+### Grid for data points
+grid <- expand.grid(
+  FruitHealthy = seq(min(veggie_lqda$FruitHealthy), max(veggie_lqda$FruitHealthy), length.out = 200),
+  VegHealthy   = seq(min(veggie_lqda$VegHealthy),   max(veggie_lqda$VegHealthy),   length.out = 200)
+)
+
+# Get LDA posterior for each grid point
+grid$pred <- predict(lda_fit, newdata = grid)$class
+
+### Plot
+ggplot() +
+  geom_tile(data = grid, aes(FruitHealthy, VegHealthy, fill = pred), 
+            alpha = 0.25) +
+  geom_point(data = veggie_lqda, 
+             aes(FruitHealthy, VegHealthy, color = ObesityClass), size = 3) +
+  labs(title = "LDA Classification Regions",
+       subtitle = "Shaded regions are predicted class",
+       fill = "Predicted Class") +
+  theme_minimal()
+```
