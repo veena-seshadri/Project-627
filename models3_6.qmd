@@ -10,6 +10,7 @@ editor: visual
 library(dplyr)
 library(tidyr)
 library(stringr)
+library(ggplot2)
 library(rpart)
 library(rpart.plot)
 library(boot)
@@ -149,7 +150,7 @@ print(plot_age)
 set.seed(1234)
 full_tree <- rpart(
   bmi_category ~ inactivity_perc + income_group,
-  data = model_data,
+  data = classification,
   method = "class"
 )
 
