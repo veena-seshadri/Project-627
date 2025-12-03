@@ -60,7 +60,7 @@ df_model2 <- df_imp |>
 ```{r}
 ### Predictor Matrix
 X <- df_model2 |>
-  select(-LocationAbbr, -YearStart, -PercentOverall) |>
+  dplyr::select(-LocationAbbr, -YearStart, -PercentOverall) |>
   as.matrix()
 
 ### Response
@@ -116,8 +116,9 @@ best_mse <- cv_ridge$cvm[cv_ridge$lambda == best_lambda]
 ```
 
 ```{r}
-best_lambda
-best_mse
+round(best_lambda,4)
+round(best_mse,4)
+sqrt(best_mse)
 ```
 
 ```{r}
@@ -128,7 +129,7 @@ names_vec <- rownames(coef(ridge_final))
 ### DF of coefficients
 coef_df <- data.frame(
   variable = names_vec,
-  coefficient = coef_vec,
+  coefficient = round(coef_vec,4),
   row.names = NULL
 )
 
@@ -143,6 +144,93 @@ top10 <- coef_df |>
 
 top10
 
+```
+
+```{r}
+### Age 18 - 24 has the smallest SD
+### Other age demographics have larger between state variance
+df_wide |> 
+  summarize(across(starts_with("Age"), ~ sd(.x, na.rm = TRUE)))
+```
+
+```{r}
+### Create Lasso for comparison
+cv_lasso <- cv.glmnet(X, y, alpha = 1, nfolds = 10)
+best_lambda_lasso <- cv_lasso$lambda.min
+
+lasso_final <- glmnet(X, y, alpha = 1, lambda = best_lambda_lasso)
+coef(lasso_final)
+
+```
+
+```{r}
+### Ridge coefficients
+ridge_coef <- coef(ridge_final)
+ridge_df <- data.frame(
+  variable = ridge_coef@Dimnames[[1]],
+  ridge = as.numeric(ridge_coef)
+) |>
+  dplyr::filter(variable != "(Intercept)")
+
+```
+
+```{r}
+### Lasso coefficients
+lasso_coef <- coef(lasso_final)
+lasso_df <- data.frame(
+  variable = lasso_coef@Dimnames[[1]],
+  lasso = as.numeric(lasso_coef)
+) |>
+  dplyr::filter(variable != "(Intercept)")
+
+```
+
+```{r}
+### Comparison
+coef_compare <- ridge_df |>
+  full_join(lasso_df, by = "variable") |>
+  arrange(desc(abs(ridge))) 
+
+coef_compare
+```
+
+```{r}
+coef_compare |> filter(lasso != 0) |> arrange(desc(abs(lasso)))
+```
+
+```{r}
+coef_table <- coef_compare |>
+  mutate(
+    ridge = round(ridge, 3),
+    lasso = round(lasso, 3),
+    selected_lasso = ifelse(lasso != 0, "Yes", "No")
+  ) |>
+  arrange(desc(abs(ridge)))  
+
+coef_table
+```
+
+```{r}
+cv_lasso <- cv.glmnet(X, y, alpha = 1, nfolds = 10)
+best_lambda_lasso <- cv_lasso$lambda.min
+best_lambda_lasso
+cv_lasso$cvm      
+cv_lasso$lambda 
+best_mse_lasso <- cv_lasso$cvm[cv_lasso$lambda == best_lambda_lasso]
+best_mse_lasso
+lambda_1se_lasso <- cv_lasso$lambda.1se
+lambda_1se_lasso
+lasso_final <- glmnet(X, y, alpha = 1, lambda = best_lambda_lasso)
+coef(lasso_final)
+
+```
+
+```{r}
+plot(cv_lasso)
+```
+
+```{r}
+plot(cv_lasso$glmnet.fit, xvar = "lambda", label = TRUE)
 ```
 
 ## Question 5:
@@ -292,6 +380,12 @@ qda_pred <- predict(qda_fit)
 table(veggie_lqda$ObesityClass, lda_pred$class)
 ### Classification rate
 mean(lda_pred$class == veggie_lqda$ObesityClass)
+```
+
+```{r}
+lda_pred <- predict(lda_fit)
+lda_pred$posterior
+
 ```
 
 ```{r}
